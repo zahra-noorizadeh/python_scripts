@@ -1,0 +1,3 @@
+order_id,invoiceId,success,status_code,response
+68949e52df428500124bc5b2,20109,False,404,"{""success"":false,""message"":""خطایی در فرآیند تایید نهایی رخ داد."",""errData"":{""statusCode"":404,""timestamp"":""2025-09-03T15:13:32.963Z"",""endpoint"":""/order/68949e52df428500124bc5b2/finalize""}}"
+689ade453ac78f0012f54b87,20305,False,404,"{""success"":false,""message"":""خطایی در فرآیند تایید نهایی رخ داد."",""errData"":{""statusCode"":404,""timestamp"":""2025-09-03T15:13:34.590Z"",""endpoint"":""/order/689ade453ac78f0012f54b87/finalize""}}"
