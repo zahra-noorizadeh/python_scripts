@@ -1,7 +1,0 @@
-.env
-__pycache__/
-*.pyc
-*.csv
-venv/
-results_pandas.csv
-results.csv

@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, timezone
-from typing import List, Set
+from typing import List, Set, Dict
 
 import pymongo
 import requests
@@ -26,38 +26,56 @@ MAIN_WALLET_TYPES = {"b2c", "mohlat"}
 OTHER_WALLET_TYPES = {"travel", "tajan", "cash", "bonus", "b2b", "b2b2c", "hamyar"}
 
 
-def get_user_ids(client: pymongo.MongoClient, phone_numbers: List[str]) -> List[str]:
+def get_user_ids(client: pymongo.MongoClient, phone_numbers: List[str]) -> Dict:
     db = client["fadax"]
     user_col = db["users"]
     user_ids = []
+    phone_to_user = {}
 
     for phone in phone_numbers:
         user = user_col.find_one({"phoneNumber": phone}, {"id": 1})
         if not user:
-            logger.warning("کاربر با شماره %s یافت نشد.", phone)
+            logger.warning("⚠️ کاربر با شماره %s یافت نشد.", phone)
             continue
         user_ids.append(user["id"])
+        phone_to_user[phone] = user["id"]
 
-    return user_ids
+    return {"user_ids": user_ids, "phone_to_user": phone_to_user}
 
 
-def check_debt_users(client: pymongo.MongoClient, user_ids: List[str]) -> List[str]:
+def check_debt_users(client: pymongo.MongoClient, user_data: dict) -> Dict:
+
+    user_ids = user_data["user_ids"]
+    phone_to_user = user_data["phone_to_user"]
+
     if not user_ids:
-        return []
+        return {"paid_phones": [], "debtor_phones": []}
 
     db = client["fadax"]
-    user_col = db["users"]
+    installment_col = db["installments"]
 
-    unpaid_users = user_col.distinct(
-        "userId",
-        {"userId": {"$in": user_ids}, "status": {"$in": ["init", "unpaid"]}}
+    unpaid_user_ids = list(
+        installment_col.find(
+            {
+                "userId": {"$in": user_ids},
+                "status": {"$in": ["init", "unpaid"]}
+            }
+        )
     )
 
-    paid_users = [uid for uid in user_ids if uid not in unpaid_users]
-    for uid in unpaid_users:
-        logger.info("کاربر با شماره کاربری %s دارای بدهی می‌باشد.", uid)
+    paid_phones = []
+    debtor_phones = []
 
-    return paid_users
+    for phone, user_id in phone_to_user.items():
+        if user_id in unpaid_user_ids:
+            debtor_phones.append(phone)
+            logger.warning("🔴 کاربر با شماره %s (userId: %s) دارای بدهی است - هیچ عملیاتی انجام نمی‌شود!", phone,
+                           user_id)
+        else:
+            paid_phones.append(phone)
+            logger.info("✅ کاربر با شماره %s (userId: %s) بدون بدهی است.", phone, user_id)
+
+    return {"paid_phones": paid_phones, "debtor_phones": debtor_phones}
 
 
 def collect_wallet_ids_to_reset(client: pymongo.MongoClient, phone_numbers: List[str]) -> Set[str]:
@@ -129,11 +147,11 @@ def reset_wallet_balances(wallet_ids: Set[str]) -> List[dict]:
             )
             response.raise_for_status()
             results.append({"wallet_id": str(wallet_id), "success": True, "data": response.json()})
-            logger.info("بالانس کیف %s با موفقیت صفر شد.", wallet_id)
+            logger.info("✅ بالانس کیف %s با موفقیت صفر شد.", wallet_id)
         except requests.RequestException as e:
             error_msg = str(e)
             results.append({"wallet_id": str(wallet_id), "success": False, "error": error_msg})
-            logger.error("خطا در صفر کردن بالانس کیف %s: %s", wallet_id, error_msg)
+            logger.error("❌ خطا در صفر کردن بالانس کیف %s: %s", wallet_id, error_msg)
 
     return results
 
@@ -154,61 +172,69 @@ def cancel_credit_requests(client: pymongo.MongoClient, phone_numbers: List[str]
             }
         )
         if result.modified_count > 0:
-            logger.info("%d درخواست اعتباری برای شماره %s لغو شد.", result.modified_count, phone)
+            logger.info("✅ %d درخواست اعتباری برای شماره %s لغو شد.", result.modified_count, phone)
         else:
-            logger.info("هیچ درخواست اعتباری برای شماره %s یافت نشد.", phone)
+            logger.info("ℹ️ هیچ درخواست اعتباری برای شماره %s یافت نشد.", phone)
 
 
 def main():
     phone_numbers = [
-        '09378888987',
-        '09196225068',
-        '09011318481',
-        '09129402534',
-        '09155796083',
-        '09132275887',
-        '09131042084',
-        '09908234184',
-        '09124626934',
-        '09367112870',
-        '09120746617',
-        '09171677088',
-        '09171677088',
-        '09171677088',
-        '09171677088',
-        '09171677088',
-        '09374491270',
-        '09056931570',
-        '09378167007',
-        '09378167007',
-        '09382719054',
+        "09331672753"
     ]
-    log_message = "لغو به دلیل تسویه حساب / عملیات دستی ادمین"  # می‌تونی این رو پارامتر کنی
+    log_message = "لغو به دلیل تسویه حساب / عملیات دستی ادمین"
 
     client = pymongo.MongoClient(MONGO_URI)
 
     try:
-        user_ids = get_user_ids(client, phone_numbers)
-        if not user_ids:
-            logger.error("هیچ کاربری یافت نشد. عملیات متوقف شد.")
+        # گام 1: دریافت اطلاعات کاربران
+        user_data = get_user_ids(client, phone_numbers)
+        if not user_data["user_ids"]:
+            logger.error("❌ هیچ کاربری یافت نشد. عملیات متوقف شد.")
             return
 
-        paid_user_ids = check_debt_users(client, user_ids)
-        if not paid_user_ids:
-            logger.warning("هیچ کاربری بدون بدهی نیست. عملیات ادامه نمی‌یابد.")
+        # گام 2: چک کردن بدهی کاربران (اولین و مهم‌ترین گام)
+        debt_result = check_debt_users(client, user_data)
+        paid_phones = debt_result["paid_phones"]
+        debtor_phones = debt_result["debtor_phones"]
+
+        # نمایش گزارش بدهکاران
+        if debtor_phones:
+            logger.warning("=" * 60)
+            logger.warning("🔴 کاربران دارای بدهی (هیچ عملیاتی انجام نمی‌شود):")
+            for phone in debtor_phones:
+                logger.warning(f"   - {phone}")
+            logger.warning("=" * 60)
+
+        # اگر هیچ کاربر بدون بدهی نداریم، متوقف می‌شویم
+        if not paid_phones:
+            logger.error("❌ همه کاربران دارای بدهی هستند. عملیات متوقف شد.")
+            logger.error("❌ لطفاً ابتدا بدهی کاربران زیر را تسویه کنید:")
+            for phone in debtor_phones:
+                logger.error(f"   - {phone}")
             return
 
-        wallet_ids_to_reset = collect_wallet_ids_to_reset(client, phone_numbers)
+        # گام 3: ادامه عملیات فقط برای کاربران بدون بدهی
+        logger.info("=" * 60)
+        logger.info("✅ شروع عملیات برای کاربران بدون بدهی:")
+        for phone in paid_phones:
+            logger.info(f"   - {phone}")
+        logger.info("=" * 60)
 
+        wallet_ids_to_reset = collect_wallet_ids_to_reset(client, paid_phones)
         reset_results = reset_wallet_balances(wallet_ids_to_reset)
+        cancel_credit_requests(client, paid_phones, log_message)
 
-        cancel_credit_requests(client, phone_numbers, log_message)
-
+        # گزارش نهایی
         success_count = sum(1 for r in reset_results if r.get("success"))
-        logger.info("عملیات تمام شد. %d کیف پول با موفقیت صفر شد.", success_count)
+        logger.info("=" * 60)
+        logger.info("✅ عملیات تمام شد:")
+        logger.info(f"   - کاربران پردازش شده: {len(paid_phones)}")
+        logger.info(f"   - کاربران با بدهی (رد شده): {len(debtor_phones)}")
+        logger.info(f"   - کیف پول‌های صفر شده: {success_count}")
+        logger.info("=" * 60)
 
     except Exception as e:
-        logger.exception("خطای غیرمنتظره در اجرای اسکریپت: %s", e)
+        logger.exception("❌ خطای غیرمنتظره در اجرای اسکریپت: %s", e)
     finally:
         client.close()
 
